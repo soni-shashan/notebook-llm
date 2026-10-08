@@ -5,13 +5,13 @@ One interactive CLI to run LLMs on a Kaggle/Colab GPU with Ollama: detect GPUs, 
 ## Install (Kaggle notebook: Internet ON, Accelerator = GPU)
 
 ```python
-!pip install -q notebook-llm
+!pip install -q notebook-llm-cli
 ```
 
 From a local folder (copy it to a writable place first, /kaggle/input is read-only):
 
 ```python
-!pip install -q ./notebook_llm     # or: pip install notebook_llm
+!pip install -q ./notebook_llm     # or: pip install notebook-llm-cli
 import notebook_llm
 notebook_llm.run()                 # opens the interactive menu (input boxes appear in the cell)
 ```
