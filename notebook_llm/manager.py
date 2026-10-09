@@ -7,9 +7,11 @@ from typing import Dict, List, Optional
 from . import installer
 from .client import OllamaClient
 from .config import continue_config
+from .disk import DiskSpaceError, SpaceCheck, check_space, default_models_dir, pick_models_dir
 from .env import is_kaggle, log
 from .gpu import detect_hardware, detect_gpus
-from .library import Candidate, make_candidate
+from .integrations import render, render_all
+from .library import Candidate, make_candidate, registry_size_gb
 from .server import OllamaServer
 from .tunnel import CloudflareTunnel
 
@@ -33,6 +35,7 @@ class Settings:
     flash_attention: bool = True
     kv_cache: str = "q8_0"              # f16 | q8_0 | q4_0 (needs flash attention)
     port: int = 11434
+    models_dir: Optional[str] = None    # None = auto (the disk with most free space)
 
     @classmethod
     def load(cls) -> "Settings":
@@ -83,13 +86,24 @@ class NotebookLLM:
         if ctx is None and ref:
             ctx = self.candidate(ref).est.context
         return OllamaServer(port=s.port, gpu_indices=self.hw.gpu.indices, keep_alive=s.keep_alive,
-                            context_length=ctx, flash_attention=s.flash_attention, kv_cache_type=s.kv_cache)
+                            context_length=ctx, flash_attention=s.flash_attention, kv_cache_type=s.kv_cache,
+                            models_dir=s.models_dir)
 
     def ensure_installed(self) -> None:
         installer.install_ollama()
 
+    @property
+    def models_dir(self) -> str:
+        return self.settings.models_dir or default_models_dir()
+
+    def space_for(self, size_gb: float) -> SpaceCheck:
+        return check_space(size_gb, self.models_dir)
+
     def start_server(self, model: Optional[str] = None) -> None:
         self.ensure_installed()
+        if not self.settings.models_dir and not self.server.is_running():
+            self.settings.models_dir = pick_models_dir()
+            self.settings.save()
         self.server = self._make_server(model)
         self.server.start()
 
@@ -107,7 +121,16 @@ class NotebookLLM:
     def loaded(self) -> List[Dict]:
         return self.client.running() if self.server.is_running() else []
 
-    def pull(self, ref: str) -> None:
+    def pull(self, ref: str, size_gb: Optional[float] = None, force: bool = False) -> None:
+        """Download a model. Raises DiskSpaceError if the disk is too small (unless force=True)."""
+        if size_gb is None:
+            name, _, tag = ref.partition(":")
+            size_gb = registry_size_gb(name, tag or "latest")
+        if size_gb and not force:
+            chk = self.space_for(size_gb)
+            if not chk.ok:
+                raise DiskSpaceError(f"Not enough disk space in {chk.path}: {chk.free_gb:.1f} GB free, "
+                                     f"need ~{chk.needed_gb:.1f} GB for {ref}.")
         self.client.pull(ref)
 
     def load(self, ref: str) -> None:
@@ -154,6 +177,14 @@ class NotebookLLM:
     def continue_config(self, autocomplete: Optional[str] = None) -> str:
         return continue_config(self.url or self.server.url, self.settings.model or "MODEL", autocomplete)
 
+    def connect(self, tool: Optional[str] = None) -> str:
+        """Ready-to-paste settings. tool: continue|cline|aider|openwebui|claude-code|cursor|antigravity|python (None = all)."""
+        url = self.url or self.server.url
+        model = self.settings.model or "MODEL"
+        ctx = self.server.context_length or self.settings.context or (
+            self.candidate(model).est.context if self.settings.model else 8192)
+        return render_all(url, model, ctx) if tool is None else render(tool, url, model, ctx)
+
     # ---- one call --------------------------------------------------
     def quickstart(self, model: str = "auto", tunnel: bool = True) -> Optional[str]:
         """Install -> start -> pull -> load -> tunnel. Returns the public URL."""
@@ -164,6 +195,6 @@ class NotebookLLM:
         self.settings.model = c.ref
         self.start_server(c.ref)
         if not self.client.has_model(c.ref):
-            self.pull(c.ref)
+            self.pull(c.ref, c.size_gb)
         self.load(c.ref)
         return self.open_tunnel() if tunnel else None

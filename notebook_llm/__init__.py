@@ -5,8 +5,10 @@ from .library import LibModel, Candidate, search, make_candidate
 from .manager import NotebookLLM, Settings
 from .cli import run, main
 from .env import is_kaggle
+from .disk import DiskSpaceError
+from .integrations import render as render_config, TOOLS
 
 __all__ = ["NotebookLLM", "Settings", "run", "main", "GPU", "GPUInfo", "Hardware",
            "detect_gpus", "detect_hardware", "Estimate", "estimate", "LibModel",
-           "Candidate", "search", "make_candidate", "is_kaggle"]
-__version__ = "0.1.0"
+           "Candidate", "search", "make_candidate", "is_kaggle", "DiskSpaceError", "render_config", "TOOLS"]
+__version__ = "0.2.0"

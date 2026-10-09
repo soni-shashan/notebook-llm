@@ -210,3 +210,89 @@ def candidates_for(model: LibModel, hw, ctx=None, kv_type="q8_0", online=True) -
     with ThreadPoolExecutor(max_workers=8) as ex:
         res = list(ex.map(lambda r: make_candidate(r, hw, ctx, kv_type, online, model.description, one), refs))
     return sorted(res, key=lambda c: c.size_gb)
+
+
+# ---------------------------------------------------------------- quant picker
+_SIZE_PREFIX = re.compile(r"^((?:\d+x)?\d+(?:\.\d+)?[bm])(?=$|-)")
+_QUANT_SUFFIX = re.compile(r"(?:^|-)((?:q\d(?:_[a-z0-9]+)*)|fp16|f16|bf16|fp8|f32)$", re.I)
+_QUALITY = [("q2", "poor"), ("q3", "low"), ("q4_0", "fair"), ("q4_1", "fair"), ("q4", "good"),
+            ("q5", "very good"), ("q6", "excellent"), ("q8", "near-lossless"),
+            ("fp16", "original"), ("f16", "original"), ("bf16", "original"), ("fp8", "very good"), ("f32", "original")]
+
+
+@dataclass
+class QuantRow:
+    tag: str
+    variant: str
+    quant: Optional[str]
+    cand: Candidate
+
+
+def size_of(tag: str) -> Optional[str]:
+    m = _SIZE_PREFIX.match(tag or "")
+    return m.group(1) if m else None
+
+
+def quant_of(tag: str) -> Optional[str]:
+    m = _QUANT_SUFFIX.search(tag)
+    return m.group(1) if m else None
+
+
+def variant_of(tag: str) -> str:
+    t = tag
+    sz = size_of(t)
+    if sz:
+        t = t[len(sz):]
+    q = quant_of(tag)
+    if q:
+        t = t[: len(t) - len(q)]
+    return t.strip("-") or "default"
+
+
+def quality_of(quant: Optional[str]) -> str:
+    if not quant:
+        return "default (~q4)"
+    q = quant.lower()
+    for key, label in _QUALITY:
+        if q.startswith(key):
+            return label
+    return "?"
+
+
+def list_tags(name: str, timeout: int = 12) -> List[str]:
+    url = f"https://ollama.com/{name}/tags" if "/" in name else f"https://ollama.com/library/{name}/tags"
+    try:
+        r = requests.get(url, headers=UA, timeout=timeout)
+        r.raise_for_status()
+    except requests.RequestException as e:
+        raise LibraryError(f"Could not load the tag list for {name} ({e}).")
+    esc = re.escape(name)
+    found = re.findall(rf"/(?:library/)?{esc}:([A-Za-z0-9._-]+)", r.text) or re.findall(rf"{esc}:([A-Za-z0-9._-]+)", r.text)
+    seen, out = set(), []
+    for t in found:
+        if t not in seen:
+            seen.add(t)
+            out.append(t)
+    if not out:
+        raise LibraryError(f"No tags found for {name}.")
+    return out
+
+
+def quant_candidates(name: str, size_tag: str, hw, ctx=None, kv_type="q8_0", online=True, limit=40) -> List[QuantRow]:
+    tags = [t for t in list_tags(name)
+            if "cloud" not in t and (t == size_tag or t.startswith(size_tag + "-"))][:limit]
+    if not tags:
+        raise LibraryError(f"No tags for {name}:{size_tag}.")
+    with ThreadPoolExecutor(max_workers=8) as ex:
+        cands = list(ex.map(lambda t: make_candidate(f"{name}:{t}", hw, ctx, kv_type, online), tags))
+    rows = [QuantRow(t, variant_of(t), quant_of(t), cd) for t, cd in zip(tags, cands)]
+    rows.sort(key=lambda r: (r.variant not in ("default", "instruct"), r.variant, r.cand.size_gb))
+    return rows
+
+
+def suggest_quant(rows: List[QuantRow], min_tok_s: float = 15.0) -> Optional[QuantRow]:
+    """Highest-quality (largest) non-base tag that fits and still runs at a usable speed."""
+    ok = [r for r in rows if r.cand.est.verdict == "fits" and r.variant not in ("base", "text", "pretrain")]
+    fast = [r for r in ok if (r.cand.est.tok_s or 0) >= min_tok_s]
+    pool = fast or ok
+    return max(pool, key=lambda r: (r.cand.size_gb, r.quant is not None)) if pool else None  # tie: prefer a named quant

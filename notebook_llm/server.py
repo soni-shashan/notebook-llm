@@ -14,7 +14,8 @@ class OllamaServer:
     def __init__(self, port: int = 11434, gpu_indices: Optional[List[int]] = None,
                  keep_alive: str = "-1", context_length: Optional[int] = None,
                  flash_attention: bool = True, kv_cache_type: Optional[str] = "q8_0",
-                 extra_env: Optional[Dict[str, str]] = None, host: str = "127.0.0.1"):
+                 extra_env: Optional[Dict[str, str]] = None, host: str = "127.0.0.1",
+                 models_dir: Optional[str] = None):
         self.host, self.port = host, port
         self.gpu_indices = gpu_indices or []
         self.keep_alive = keep_alive
@@ -22,6 +23,7 @@ class OllamaServer:
         self.flash_attention = flash_attention
         self.kv_cache_type = kv_cache_type
         self.extra_env = extra_env or {}
+        self.models_dir = models_dir
         self.process: Optional[subprocess.Popen] = None
 
     @property
@@ -38,6 +40,9 @@ class OllamaServer:
         env = os.environ.copy()
         env["OLLAMA_HOST"] = f"{self.host}:{self.port}"
         env["OLLAMA_KEEP_ALIVE"] = self.keep_alive
+        if self.models_dir:
+            os.makedirs(self.models_dir, exist_ok=True)
+            env["OLLAMA_MODELS"] = self.models_dir
         if self.gpu_indices:
             env["CUDA_VISIBLE_DEVICES"] = ",".join(map(str, self.gpu_indices))
             if len(self.gpu_indices) > 1:
